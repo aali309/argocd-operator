@@ -1,0 +1,19 @@
+# Check first ArgoCD instance configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-1-cm
+  namespace: test-1-046-application-tracking
+data:
+  resource.tracking.method: "annotation"
+  resource.tracking.annotations: '{"installationID":"instance-1"}'
+---
+# Check second ArgoCD instance configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-2-cm
+  namespace: test-1-046-application-tracking
+data:
+  resource.tracking.method: "annotation"
+  resource.tracking.annotations: '{"installationID":"instance-2"}'

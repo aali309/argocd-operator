@@ -1,0 +1,27 @@
+# Check first application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: same-app-name
+  namespace: test-1-046-application-tracking
+  labels:
+    argocd.argoproj.io/instance: argocd-1
+status:
+  sync:
+    status: Synced
+  health:
+    status: Healthy
+---
+# Check second application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: same-app-name
+  namespace: test-1-046-application-tracking
+  labels:
+    argocd.argoproj.io/instance: argocd-2
+status:
+  sync:
+    status: Synced
+  health:
+    status: Healthy

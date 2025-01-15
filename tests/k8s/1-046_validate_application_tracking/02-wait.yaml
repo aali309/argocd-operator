@@ -1,0 +1,15 @@
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: argocd-1
+  namespace: test-1-046-application-tracking
+status:
+  phase: Available
+---
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: argocd-2
+  namespace: test-1-046-application-tracking
+status:
+  phase: Available

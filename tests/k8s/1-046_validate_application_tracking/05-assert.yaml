@@ -1,0 +1,19 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 600
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guestbook-ui
+  namespace: guestbook
+  annotations:
+    argocd.argoproj.io/tracking-id: instance-1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guestbook-ui
+  namespace: guestbook-second
+  annotations:
+    argocd.argoproj.io/tracking-id: instance-2

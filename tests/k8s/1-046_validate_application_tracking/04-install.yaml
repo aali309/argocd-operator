@@ -1,0 +1,17 @@
+# Create second application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: same-app-name
+  namespace: test-1-046-application-tracking
+  labels:
+    argocd.argoproj.io/instance: argocd-2
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps.git
+    path: guestbook
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: guestbook-second

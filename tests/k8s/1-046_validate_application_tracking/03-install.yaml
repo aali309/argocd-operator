@@ -1,0 +1,18 @@
+# Create first application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: same-app-name
+  namespace: test-1-046-application-tracking
+  labels:
+    argocd.argoproj.io/instance: argocd-1
+    argocd.argoproj.io/managed-by: argocd-1
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps.git
+    path: guestbook
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: guestbook
