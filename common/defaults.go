@@ -70,7 +70,7 @@ const (
 	ArgoCDDefaultArgoImage = "quay.io/argoproj/argocd"
 
 	// ArgoCDDefaultArgoVersion is the Argo CD container image digest to use when version not specified.
-	ArgoCDDefaultArgoVersion = "sha256:16b92ba472fbb9287459cc52e0ecff07288dff461209955098edb56ce866fe49" // v3.3.6
+	ArgoCDDefaultArgoVersion = "sha256:5d45dc6db21db32a0638ac9128462c6d9956a90fc81760146dada5a243ff7516" // v3.3.8
 
 	// ArgoCDDefaultBackupKeyLength is the length of the generated default backup key.
 	ArgoCDDefaultBackupKeyLength = 32
@@ -117,6 +117,14 @@ const (
 
 	// ArgoCDDefaultDexServiceAccountName is the default Service Account name for the Dex server.
 	ArgoCDDefaultDexServiceAccountName = "argocd-dex-server"
+
+	// ArgoCDDexServerTokenExpirySecs is the Dex SA token lifetime in seconds (1 hour).
+	ArgoCDDexServerTokenExpirySecs = int64(3600)
+
+	// ArgoCDDexServerTokenRenewalThresholdPercent (1-99): renew the Dex token when less than this percent
+	// of ArgoCDDexServerTokenExpirySecs remains (default 33 is approximately equivalent to the last third
+	// of a 1h nominal lifetime).
+	ArgoCDDexServerTokenRenewalThresholdPercent int64 = 33
 
 	// ArgoCDDefaultDexVersion is the Dex container image tag to use when not specified.
 	ArgoCDDefaultDexVersion = "sha256:b08a58c9731c693b8db02154d7afda798e1888dc76db30d34c4a0d0b8a26d913" // v2.43.0
@@ -301,6 +309,8 @@ vs-ssh.visualstudio.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOf
 
 	// ArgoCDDefaultClusterDomain is the default cluster domain suffix for service FQDNs.
 	ArgoCDDefaultClusterDomain = "cluster.local"
+	// ArgoCDDefaultWebTerminalEnabled is the default web terminal enabled switch.
+	ArgoCDDefaultWebTerminalEnabled = "false"
 )
 
 // DefaultLabels returns the default set of labels for controllers.
