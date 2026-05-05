@@ -1335,6 +1335,42 @@ func Test_applyDeclarativeWebhookSecrets_nilWebhookSecretsSpecPreservesManualKey
 	assert.Equal(t, []byte("gogs"), argocd.Data[common.ArgoCDKeyGogsWebhookSecret])
 }
 
+// Test_applyDeclarativeWebhookSecrets_partialProviderClearsUnconfiguredKey verifies that when spec.webhookSecrets is set
+// for GitHub only, a pre-existing webhook.gitlab.secret entry is removed (declarative semantics for omitted providers).
+// suggested by @coderabbitai here https://github.com/argoproj-labs/argocd-operator/pull/2178/#:~:text=Consider%20adding%20a,to%20declarative%20management
+func Test_applyDeclarativeWebhookSecrets_partialProviderClearsUnconfiguredKey(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	assert.NoError(t, clientgoscheme.AddToScheme(scheme))
+	assert.NoError(t, argoproj.AddToScheme(scheme))
+	cr := &argoproj.ArgoCD{
+		ObjectMeta: metav1.ObjectMeta{Name: "argocd", Namespace: "ns-a"},
+		Spec: argoproj.ArgoCDSpec{
+			WebhookSecrets: &argoproj.ArgoCDWebhookSecretsSpec{
+				GitHub: &argoproj.ArgoCDWebhookSecretsGitHub{
+					WebhookSecretRef: &argoproj.WebhookSecretKeySelector{Name: "gh", Key: "t"},
+				},
+				// GitLab deliberately omitted — operator must clear its managed key when declarative management is on.
+			},
+		},
+	}
+	gh := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh", Namespace: "ns-a"},
+		Data:       map[string][]byte{"t": []byte("gh-val")},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gh).Build()
+	argocd := &corev1.Secret{Data: map[string][]byte{
+		common.ArgoCDKeyGitHubWebhookSecret: []byte("old-gh"),
+		common.ArgoCDKeyGitLabWebhookSecret: []byte("pre-existing-gitlab"),
+	}}
+	var changes []string
+	require.NoError(t, applyDeclarativeWebhookSecrets(ctx, cl, cr, argocd, &changes))
+	assert.Equal(t, []byte("gh-val"), argocd.Data[common.ArgoCDKeyGitHubWebhookSecret])
+	assert.Empty(t, argocd.Data[common.ArgoCDKeyGitLabWebhookSecret])
+	assert.Contains(t, changes, "GitHub webhook secret")
+	assert.Contains(t, changes, "GitLab webhook secret")
+}
+
 // getAlwaysErrClient wraps a client.Client and always returns getErr from Get (for testing Secret read failures).
 type getAlwaysErrClient struct {
 	client.Client
