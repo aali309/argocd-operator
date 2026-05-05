@@ -334,7 +334,96 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 			)
 		})
 
-		It("removes webhook.github.secret from argocd-secret when spec.webhookSecrets is cleared", func() {
+		It("does not remove webhook.github.secret when spec.webhookSecrets is never set on the Argo CD CR", func() {
+			ns, cleanupFunc := fixture.CreateRandomE2ETestNamespaceWithCleanupFunc()
+			defer cleanupFunc()
+
+			argoCD := &argov1beta1api.ArgoCD{
+				ObjectMeta: metav1.ObjectMeta{Name: "example-argocd-manual-github-webhook", Namespace: ns.Name},
+				Spec: argov1beta1api.ArgoCDSpec{
+					Server: argov1beta1api.ArgoCDServerSpec{
+						Route: argov1beta1api.ArgoCDRouteSpec{Enabled: true},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, argoCD)).To(Succeed())
+
+			argocdSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "argocd-secret", Namespace: ns.Name}}
+			By("waiting for argocd-secret and operator-populated keys")
+			Eventually(argocdSecret, "5m", "5s").Should(k8sFixture.ExistByName())
+			Eventually(argocdSecret, "5m", "5s").Should(secretFixture.HaveNonEmptyKeyValue(common.ArgoCDKeyAdminPassword))
+
+			manualToken := []byte("e2e-manual-only-github-webhook-token")
+			By("writing webhook.github.secret on argocd-secret without spec.webhookSecrets")
+			secretFixture.Update(argocdSecret, func(s *corev1.Secret) {
+				if s.Data == nil {
+					s.Data = map[string][]byte{}
+				}
+				s.Data[common.ArgoCDKeyGitHubWebhookSecret] = manualToken
+			})
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			Expect(argoCD.Spec.WebhookSecrets).To(BeNil())
+
+			Eventually(argocdSecret, "2m", "3s").Should(
+				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, manualToken),
+			)
+			Consistently(argocdSecret, "30s", "5s").Should(
+				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, manualToken),
+			)
+		})
+
+		It("preserves webhook.github.secret after declarative sync when entire spec.webhookSecrets is cleared", func() {
+			ns, cleanupFunc := fixture.CreateRandomE2ETestNamespaceWithCleanupFunc()
+			defer cleanupFunc()
+
+			argoCD := &argov1beta1api.ArgoCD{
+				ObjectMeta: metav1.ObjectMeta{Name: "example-argocd-nil-whole-webhooksecrets", Namespace: ns.Name},
+				Spec: argov1beta1api.ArgoCDSpec{
+					Server: argov1beta1api.ArgoCDServerSpec{
+						Route: argov1beta1api.ArgoCDRouteSpec{Enabled: true},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, argoCD)).To(Succeed())
+
+			argocdSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "argocd-secret", Namespace: ns.Name}}
+			By("waiting for argocd-secret and operator-populated keys")
+			Eventually(argocdSecret, "5m", "5s").Should(k8sFixture.ExistByName())
+			Eventually(argocdSecret, "5m", "5s").Should(secretFixture.HaveNonEmptyKeyValue(common.ArgoCDKeyAdminPassword))
+
+			token := "e2e-nil-stanza-github-token"
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "gh-nil-stanza-creds", Namespace: ns.Name},
+				Type:       corev1.SecretTypeOpaque,
+				StringData: map[string]string{"token": token},
+			})).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			argoCD.Spec.WebhookSecrets = &argov1beta1api.ArgoCDWebhookSecretsSpec{
+				GitHub: &argov1beta1api.ArgoCDWebhookSecretsGitHub{
+					WebhookSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "gh-nil-stanza-creds", Key: "token"},
+				},
+			}
+			Expect(k8sClient.Update(ctx, argoCD)).To(Succeed())
+
+			Eventually(argocdSecret, "2m", "3s").Should(
+				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, []byte(token)),
+			)
+
+			By("merging spec.webhookSecrets: null so the field is unset (operator skips per-provider webhook cleanup)")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			Expect(k8sClient.Patch(ctx, argoCD, client.RawPatch(types.MergePatchType, []byte(`{"spec":{"webhookSecrets":null}}`)))).To(Succeed())
+
+			Eventually(argocdSecret, "2m", "3s").Should(
+				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, []byte(token)),
+			)
+			Consistently(argocdSecret, "30s", "5s").Should(
+				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, []byte(token)),
+			)
+		})
+
+		It("removes webhook.github.secret from argocd-secret when GitHub is not declared in spec.webhookSecrets", func() {
 			By("creating Argo CD instance and syncing GitHub webhook secret")
 			ns, cleanupFunc := fixture.CreateRandomE2ETestNamespaceWithCleanupFunc()
 			defer cleanupFunc()
@@ -376,10 +465,10 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 				secretFixture.HaveDataKeyValue(common.ArgoCDKeyGitHubWebhookSecret, []byte(token)),
 			)
 
-			By("clearing spec.webhookSecrets on the ArgoCD CR")
-			argocdFixture.Update(argoCD, func(ac *argov1beta1api.ArgoCD) {
-				ac.Spec.WebhookSecrets = nil
-			})
+			By("making GitHub undeclared in spec.webhookSecrets via merge patch")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			gitHubRemovalPatch := []byte(`{"spec":{"webhookSecrets":{"github":null}}}`)
+			Expect(k8sClient.Patch(ctx, argoCD, client.RawPatch(types.MergePatchType, gitHubRemovalPatch))).To(Succeed())
 			Eventually(argoCD, "5m", "5s").Should(argocdFixture.BeAvailable())
 
 			By("waiting for webhook.github.secret to be removed from argocd-secret")
@@ -455,13 +544,13 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 			)
 		})
 
-		It("removes Azure DevOps webhook keys from argocd-secret when spec.webhookSecrets is cleared", func() {
+		It("removes Azure DevOps webhook keys from argocd-secret when azureDevOps is dropped from spec.webhookSecrets", func() {
 			By("creating Argo CD instance and syncing Azure DevOps webhook credentials")
 			ns, cleanupFunc := fixture.CreateRandomE2ETestNamespaceWithCleanupFunc()
 			defer cleanupFunc()
 
 			argoCD := &argov1beta1api.ArgoCD{
-				ObjectMeta: metav1.ObjectMeta{Name: "example-argocd-clear-ado", Namespace: ns.Name},
+				ObjectMeta: metav1.ObjectMeta{Name: "example-argocd-drop-ado", Namespace: ns.Name},
 				Spec: argov1beta1api.ArgoCDSpec{
 					Server: argov1beta1api.ArgoCDServerSpec{
 						Route: argov1beta1api.ArgoCDRouteSpec{Enabled: true},
@@ -477,10 +566,10 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 			argocdSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "argocd-secret", Namespace: ns.Name}}
 			Eventually(argocdSecret, "2m", "3s").Should(k8sFixture.ExistByName())
 
-			u := "e2e-clear-ado-user"
-			p := "e2e-clear-ado-pass"
+			u := "e2e-drop-ado-user"
+			p := "e2e-drop-ado-pass"
 			Expect(k8sClient.Create(ctx, &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "ado-clear-creds", Namespace: ns.Name},
+				ObjectMeta: metav1.ObjectMeta{Name: "ado-drop-creds", Namespace: ns.Name},
 				Type:       corev1.SecretTypeOpaque,
 				StringData: map[string]string{"username": u, "password": p},
 			})).To(Succeed())
@@ -488,8 +577,8 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
 			argoCD.Spec.WebhookSecrets = &argov1beta1api.ArgoCDWebhookSecretsSpec{
 				AzureDevOps: &argov1beta1api.ArgoCDWebhookSecretsAzureDevOps{
-					UsernameSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-clear-creds", Key: "username"},
-					PasswordSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-clear-creds", Key: "password"},
+					UsernameSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-drop-creds", Key: "username"},
+					PasswordSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-drop-creds", Key: "password"},
 				},
 			}
 			Expect(k8sClient.Update(ctx, argoCD)).To(Succeed())
@@ -502,13 +591,74 @@ var _ = Describe("GitOps Operator Parallel E2E Tests", func() {
 				),
 			)
 
-			By("clearing spec.webhookSecrets on the ArgoCD CR")
-			argocdFixture.Update(argoCD, func(ac *argov1beta1api.ArgoCD) {
-				ac.Spec.WebhookSecrets = nil
-			})
+			By("removing only azureDevOps from spec.webhookSecrets via merge patch")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			adoRemovalPatch := []byte(`{"spec":{"webhookSecrets":{"azureDevOps":null}}}`)
+			Expect(k8sClient.Patch(ctx, argoCD, client.RawPatch(types.MergePatchType, adoRemovalPatch))).To(Succeed())
 			Eventually(argoCD, "5m", "5s").Should(argocdFixture.BeAvailable())
 
 			By("waiting for Azure DevOps webhook keys to be removed from argocd-secret")
+			Eventually(argocdSecret, "2m", "3s").Should(
+				And(
+					secretFixture.NotHaveDataKey(common.ArgoCDKeyAzureDevOpsWebhookUsername),
+					secretFixture.NotHaveDataKey(common.ArgoCDKeyAzureDevOpsWebhookPassword),
+				),
+			)
+		})
+
+		It("clears both Azure DevOps webhook keys from argocd-secret when only one ref can be resolved", func() {
+			By("creating Argo CD instance and syncing Azure DevOps webhook credentials")
+			ns, cleanupFunc := fixture.CreateRandomE2ETestNamespaceWithCleanupFunc()
+			defer cleanupFunc()
+
+			argoCD := &argov1beta1api.ArgoCD{
+				ObjectMeta: metav1.ObjectMeta{Name: "example-argocd-ado-atomic", Namespace: ns.Name},
+				Spec: argov1beta1api.ArgoCDSpec{
+					Server: argov1beta1api.ArgoCDServerSpec{
+						Route: argov1beta1api.ArgoCDRouteSpec{Enabled: true},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, argoCD)).To(Succeed())
+			Eventually(argoCD, "5m", "5s").Should(argocdFixture.BeAvailable())
+
+			argocdSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "argocd-secret", Namespace: ns.Name}}
+			Eventually(argocdSecret, "2m", "3s").Should(k8sFixture.ExistByName())
+
+			u := "e2e-ado-atomic-user"
+			p := "e2e-ado-atomic-pass"
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "ado-atomic-creds", Namespace: ns.Name},
+				Type:       corev1.SecretTypeOpaque,
+				StringData: map[string]string{"username": u, "password": p},
+			})).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(argoCD), argoCD)).To(Succeed())
+			argoCD.Spec.WebhookSecrets = &argov1beta1api.ArgoCDWebhookSecretsSpec{
+				AzureDevOps: &argov1beta1api.ArgoCDWebhookSecretsAzureDevOps{
+					UsernameSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-atomic-creds", Key: "username"},
+					PasswordSecretRef: &argov1beta1api.WebhookSecretKeySelector{Name: "ado-atomic-creds", Key: "password"},
+				},
+			}
+			Expect(k8sClient.Update(ctx, argoCD)).To(Succeed())
+
+			Eventually(argocdSecret, "2m", "3s").Should(
+				And(
+					secretFixture.HaveDataKeyValue(common.ArgoCDKeyAzureDevOpsWebhookUsername, []byte(u)),
+					secretFixture.HaveDataKeyValue(common.ArgoCDKeyAzureDevOpsWebhookPassword, []byte(p)),
+				),
+			)
+
+			By("pointing passwordSecretRef at a Secret that does not exist (username still valid)")
+			argocdFixture.Update(argoCD, func(ac *argov1beta1api.ArgoCD) {
+				ac.Spec.WebhookSecrets.AzureDevOps.PasswordSecretRef = &argov1beta1api.WebhookSecretKeySelector{
+					Name: "ado-atomic-missing-secret",
+					Key:  "password",
+				}
+			})
+			Eventually(argoCD, "5m", "5s").Should(argocdFixture.BeAvailable())
+
+			By("waiting for both Azure DevOps keys to be removed (atomic credential pair)")
 			Eventually(argocdSecret, "2m", "3s").Should(
 				And(
 					secretFixture.NotHaveDataKey(common.ArgoCDKeyAzureDevOpsWebhookUsername),

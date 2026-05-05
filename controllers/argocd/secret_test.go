@@ -1204,7 +1204,7 @@ func Test_applyAzureDevOpsWebhookSecretRefs(t *testing.T) {
 		assert.Empty(t, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookPassword])
 	})
 
-	t.Run("empty username ref name removes only username key", func(t *testing.T) {
+	t.Run("invalid username ref clears both managed keys", func(t *testing.T) {
 		ws := &argoproj.ArgoCDWebhookSecretsSpec{
 			AzureDevOps: &argoproj.ArgoCDWebhookSecretsAzureDevOps{
 				UsernameSecretRef: &argoproj.WebhookSecretKeySelector{Name: "", Key: "username"},
@@ -1221,7 +1221,28 @@ func Test_applyAzureDevOpsWebhookSecretRefs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, changed)
 		assert.Empty(t, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookUsername])
-		assert.Equal(t, []byte("p-only"), argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookPassword])
+		assert.Empty(t, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookPassword])
+	})
+
+	t.Run("unresolvable password ref clears both managed keys", func(t *testing.T) {
+		ws := &argoproj.ArgoCDWebhookSecretsSpec{
+			AzureDevOps: &argoproj.ArgoCDWebhookSecretsAzureDevOps{
+				UsernameSecretRef: &argoproj.WebhookSecretKeySelector{Name: "ado", Key: "username"},
+				PasswordSecretRef: &argoproj.WebhookSecretKeySelector{Name: "missing", Key: "password"},
+			},
+		}
+		cr := &argoproj.ArgoCD{ObjectMeta: metav1.ObjectMeta{Name: "argocd", Namespace: "ns-a"}, Spec: argoproj.ArgoCDSpec{WebhookSecrets: ws}}
+		ado := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "ado", Namespace: "ns-a"}, Data: map[string][]byte{"username": []byte("u-ok")}}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ado).Build()
+		argocd := &corev1.Secret{Data: map[string][]byte{
+			common.ArgoCDKeyAzureDevOpsWebhookUsername: []byte("old-u"),
+			common.ArgoCDKeyAzureDevOpsWebhookPassword: []byte("old-p"),
+		}}
+		changed, err := applyAzureDevOpsWebhookSecretRefs(ctx, cl, cr, argocd, ws)
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.Empty(t, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookUsername])
+		assert.Empty(t, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookPassword])
 	})
 
 	t.Run("get error on username ref preserves both stale values", func(t *testing.T) {
@@ -1277,6 +1298,41 @@ func Test_applyDeclarativeWebhookSecrets_multiProvider(t *testing.T) {
 	assert.Contains(t, changes, "GitLab webhook secret")
 	assert.Equal(t, []byte("g"), argocd.Data[common.ArgoCDKeyGitHubWebhookSecret])
 	assert.Equal(t, []byte("l"), argocd.Data[common.ArgoCDKeyGitLabWebhookSecret])
+}
+
+// Test_applyDeclarativeWebhookSecrets_nilWebhookSecretsSpecPreservesManualKeys ensures we do not strip webhook.* data
+// when declarative webhook management is not configured (spec.webhookSecrets unset).
+func Test_applyDeclarativeWebhookSecrets_nilWebhookSecretsSpecPreservesManualKeys(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	assert.NoError(t, clientgoscheme.AddToScheme(scheme))
+	assert.NoError(t, argoproj.AddToScheme(scheme))
+	cr := &argoproj.ArgoCD{
+		ObjectMeta: metav1.ObjectMeta{Name: "argocd", Namespace: "ns-a"},
+		Spec:       argoproj.ArgoCDSpec{},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	gh, gl := []byte("manual-github"), []byte("manual-gitlab")
+	adoU, adoP := []byte("ado-u"), []byte("ado-p")
+	argocd := &corev1.Secret{Data: map[string][]byte{
+		common.ArgoCDKeyGitHubWebhookSecret:          gh,
+		common.ArgoCDKeyGitLabWebhookSecret:          gl,
+		common.ArgoCDKeyAzureDevOpsWebhookUsername:   adoU,
+		common.ArgoCDKeyAzureDevOpsWebhookPassword:   adoP,
+		common.ArgoCDKeyBitbucketCloudWebhookSecret:  []byte("bb"),
+		common.ArgoCDKeyBitbucketServerWebhookSecret: []byte("bbs"),
+		common.ArgoCDKeyGogsWebhookSecret:            []byte("gogs"),
+	}}
+	var changes []string
+	require.NoError(t, applyDeclarativeWebhookSecrets(ctx, cl, cr, argocd, &changes))
+	assert.Empty(t, changes)
+	assert.Equal(t, gh, argocd.Data[common.ArgoCDKeyGitHubWebhookSecret])
+	assert.Equal(t, gl, argocd.Data[common.ArgoCDKeyGitLabWebhookSecret])
+	assert.Equal(t, adoU, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookUsername])
+	assert.Equal(t, adoP, argocd.Data[common.ArgoCDKeyAzureDevOpsWebhookPassword])
+	assert.Equal(t, []byte("bb"), argocd.Data[common.ArgoCDKeyBitbucketCloudWebhookSecret])
+	assert.Equal(t, []byte("bbs"), argocd.Data[common.ArgoCDKeyBitbucketServerWebhookSecret])
+	assert.Equal(t, []byte("gogs"), argocd.Data[common.ArgoCDKeyGogsWebhookSecret])
 }
 
 // getAlwaysErrClient wraps a client.Client and always returns getErr from Get (for testing Secret read failures).

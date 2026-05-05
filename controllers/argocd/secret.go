@@ -480,6 +480,7 @@ func applyAllSingleRefDeclarativeWebhookSecrets(ctx context.Context, c client.Cl
 }
 
 // applyAzureDevOpsWebhookSecretRefs syncs username and password refs when azureDevOps is set; otherwise removes both keys.
+// Username and password are applied atomically: both references must resolve or both managed keys are cleared (avoid half-configured pair).
 func applyAzureDevOpsWebhookSecretRefs(ctx context.Context, c client.Client, cr *argoproj.ArgoCD, argocdSecret *corev1.Secret, webhookSecrets *argoproj.ArgoCDWebhookSecretsSpec) (bool, error) {
 	if webhookSecrets == nil || webhookSecrets.AzureDevOps == nil {
 		c1 := deleteManagedWebhookKey(argocdSecret, common.ArgoCDKeyAzureDevOpsWebhookUsername)
@@ -487,32 +488,44 @@ func applyAzureDevOpsWebhookSecretRefs(ctx context.Context, c client.Client, cr 
 		return c1 || c2, nil
 	}
 	ado := webhookSecrets.AzureDevOps
-	fields := []struct {
-		ref     *argoproj.WebhookSecretKeySelector
-		destKey string
-		logName string
-	}{
-		{ado.UsernameSecretRef, common.ArgoCDKeyAzureDevOpsWebhookUsername, "Azure DevOps username"},
-		{ado.PasswordSecretRef, common.ArgoCDKeyAzureDevOpsWebhookPassword, "Azure DevOps password"},
+	u, uOk, err := resolveWebhookSecretKeyBytes(ctx, c, cr, ado.UsernameSecretRef, "Azure DevOps username")
+	if err != nil {
+		return false, err
 	}
-	var changed bool
-	for _, f := range fields {
-		fieldChanged, err := applyWebhookSecretFromRef(ctx, c, cr, argocdSecret, f.ref, f.destKey, f.logName)
-		if err != nil {
-			return false, err
+	p, pOk, err := resolveWebhookSecretKeyBytes(ctx, c, cr, ado.PasswordSecretRef, "Azure DevOps password")
+	if err != nil {
+		return false, err
+	}
+	userKey := common.ArgoCDKeyAzureDevOpsWebhookUsername
+	passKey := common.ArgoCDKeyAzureDevOpsWebhookPassword
+	if uOk && pOk {
+		var changed bool
+		if argocdSecret.Data == nil {
+			argocdSecret.Data = make(map[string][]byte)
 		}
-		changed = changed || fieldChanged
+		if !bytes.Equal(argocdSecret.Data[userKey], u) {
+			argocdSecret.Data[userKey] = u
+			changed = true
+		}
+		if !bytes.Equal(argocdSecret.Data[passKey], p) {
+			argocdSecret.Data[passKey] = p
+			changed = true
+		}
+		return changed, nil
 	}
-	return changed, nil
+	c1 := deleteManagedWebhookKey(argocdSecret, userKey)
+	c2 := deleteManagedWebhookKey(argocdSecret, passKey)
+	return c1 || c2, nil
 }
 
 // applyDeclarativeWebhookSecrets applies single-ref webhook providers then Azure DevOps refs from cr.Spec.WebhookSecrets into argocd-secret.
 // It appends the change reasons to *changes when the secret is modified.
+// When .spec.webhookSecrets is absent, the secret is left unchanged so manually populated webhook.* keys in argocd-secret are not removed.
 func applyDeclarativeWebhookSecrets(ctx context.Context, c client.Client, cr *argoproj.ArgoCD, argocdSecret *corev1.Secret, changes *[]string) error {
-	var webhookSecrets *argoproj.ArgoCDWebhookSecretsSpec
-	if cr.Spec.WebhookSecrets != nil {
-		webhookSecrets = cr.Spec.WebhookSecrets
+	if cr.Spec.WebhookSecrets == nil {
+		return nil
 	}
+	webhookSecrets := cr.Spec.WebhookSecrets
 	if err := applyAllSingleRefDeclarativeWebhookSecrets(ctx, c, cr, argocdSecret, webhookSecrets, changes); err != nil {
 		return err
 	}
@@ -526,35 +539,51 @@ func applyDeclarativeWebhookSecrets(ctx context.Context, c client.Client, cr *ar
 	return nil
 }
 
-// applyWebhookSecretFromRef copies the referenced Secret key into argocdSecret.Data[destKey].
-// Returns true if argocdSecret was modified.
-// If ref is nil, ref.Name is empty, or the Secret/key cannot be resolved, any managed value at destKey is removed.
-// Other Secret Get errors are returned so the reconciler can retry.
-func applyWebhookSecretFromRef(ctx context.Context, c client.Client, cr *argoproj.ArgoCD, argocdSecret *corev1.Secret, ref *argoproj.WebhookSecretKeySelector, destKey, providerLogName string) (bool, error) {
+// resolveWebhookSecretKeyBytes retrieves the referenced Secret key bytes without mutating argocd-secret.
+// It returns (val, ok, err) where:
+//   - ok=true when a non-empty value is successfully read
+//   - ok=false with err=nil for expected skip conditions (nil ref, empty name, missing Secret, or missing/empty key)
+//   - err!=nil only for unexpected API errors so the reconciler can retry
+func resolveWebhookSecretKeyBytes(ctx context.Context, c client.Client, cr *argoproj.ArgoCD, ref *argoproj.WebhookSecretKeySelector, providerLogName string) (val []byte, ok bool, err error) {
 	if ref == nil {
-		return deleteManagedWebhookKey(argocdSecret, destKey), nil
+		return nil, false, nil
 	}
 	if ref.Name == "" {
 		log.Info(fmt.Sprintf("skipping %s webhook secret sync: referenced Secret name is empty", providerLogName))
-		return deleteManagedWebhookKey(argocdSecret, destKey), nil
+		return nil, false, nil
 	}
 	ns := cr.Namespace
 	src := &corev1.Secret{}
 	key := types.NamespacedName{Name: ref.Name, Namespace: ns}
 	if err := c.Get(ctx, key, src); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return false, err
+			return nil, false, err
 		}
 		log.Info(fmt.Sprintf("warning: %s webhook secret reference not found (Secret %s/%s), skipping sync", providerLogName, ns, ref.Name))
-		return deleteManagedWebhookKey(argocdSecret, destKey), nil
+		return nil, false, nil
 	}
-	raw, ok := src.Data[ref.Key]
-	if !ok || len(raw) == 0 {
+	raw, hasKey := src.Data[ref.Key]
+	if !hasKey || len(raw) == 0 {
 		log.Info(fmt.Sprintf("warning: key %q missing or empty in Secret %s/%s, skipping %s webhook secret sync", ref.Key, ns, ref.Name, providerLogName))
+		return nil, false, nil
+	}
+	val = make([]byte, len(raw))
+	copy(val, raw)
+	return val, true, nil
+}
+
+// applyWebhookSecretFromRef copies the referenced Secret key into argocdSecret.Data[destKey].
+// Returns true if argocdSecret was modified.
+// If ref is nil, ref.Name is empty, or the Secret/key cannot be resolved, any managed value at destKey is removed.
+// Other Secret Get errors are returned so the reconciler can retry.
+func applyWebhookSecretFromRef(ctx context.Context, c client.Client, cr *argoproj.ArgoCD, argocdSecret *corev1.Secret, ref *argoproj.WebhookSecretKeySelector, destKey, providerLogName string) (bool, error) {
+	val, ok, err := resolveWebhookSecretKeyBytes(ctx, c, cr, ref, providerLogName)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
 		return deleteManagedWebhookKey(argocdSecret, destKey), nil
 	}
-	val := make([]byte, len(raw))
-	copy(val, raw)
 	if argocdSecret.Data == nil {
 		argocdSecret.Data = make(map[string][]byte)
 	}
